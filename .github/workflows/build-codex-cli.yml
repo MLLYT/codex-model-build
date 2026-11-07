@@ -9,12 +9,19 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: never
+      CARGO_HOME: C:\c
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       UPSTREAM_TAG: rust-v0.167.0-alpha.3.2
-      UPSTREAM_HEAD: c40729e
+      UPSTREAM_HEAD: c40729e    
     steps:
+      - name: Enable long Git paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+
       - name: Show runner disk
         shell: pwsh
         run: Get-PSDrive C | Select-Object Used,Free | Format-Table | Out-String | Write-Host
+
 
       - name: Checkout upstream codex at exact tag
         uses: actions/checkout@v4
