@@ -1,0 +1,75 @@
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 055feec..9b20ca6 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -62,6 +62,32 @@ pub fn spawn_response_stream(
+         .get(REQUEST_ID_HEADER)
+         .and_then(|value| value.to_str().ok())
+         .map(str::to_string);
++    // --- CodexRouteMonitor layer "sse" (default via CODEX_SERVER_MODEL_LOG): exact provenance
++    // plus the upstream x-request-id. One record per SSE response, never duplicated.
++    if let (Some(model), Ok(path)) = (
++        server_model.as_deref(),
++        std::env::var("CODEX_SERVER_MODEL_LOG"),
++    ) && !path.trim().is_empty()
++    {
++        let ts_ms = std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .map(|d| d.as_millis())
++            .unwrap_or(0);
++        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
++        let line = format!(
++            "{{\"ts\":{ts_ms},\"layer\":\"sse\",\"server_model\":\"{}\",\"requested_model\":null,\"transport\":\"sse_header\",\"request_id\":{},\"thread_id\":null,\"response_id\":null,\"evidence_source\":\"openai-model response header (sse)\"}}\n",
++            esc(model),
++            match upstream_request_id.as_deref() {
++                Some(id) => format!("\"{}\"", esc(id)),
++                None => "null".to_string(),
++            },
++        );
++        let _ = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(path.trim())
++            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
++    }
+     let safety_buffering_treatment =
+         treatment_from_headers(&stream_response.headers).unwrap_or_default();
+     if let Some(turn_state) = turn_state.as_ref()
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index b25f718..4aab2f8 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3261,6 +3261,33 @@ async fn try_run_sampling_request(
+                 }
+             }
+             ResponseEvent::ServerModel(server_model) => {
++                // --- CodexRouteMonitor layer "core" (opt-in via CODEX_SERVER_MODEL_LOG_CORE): fires for
++                // every ServerModel event, before the warning de-duplication flag. No request id here.
++                if let Ok(path) = std::env::var("CODEX_SERVER_MODEL_LOG_CORE") {
++                    let path = path.trim();
++                    if !path.is_empty() {
++                        let ts_ms = std::time::SystemTime::now()
++                            .duration_since(std::time::UNIX_EPOCH)
++                            .map(|d| d.as_millis())
++                            .unwrap_or(0);
++                        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
++                        let line = format!(
++                            "{{\"ts\":{ts_ms},\"layer\":\"core\",\"server_model\":\"{}\",\"requested_model\":\"{}\",\"transport\":\"unknown\",\"request_id\":null,\"thread_id\":\"{}\",\"response_id\":{},\"evidence_source\":\"core ResponseEvent::ServerModel\"}}\n",
++                            esc(&server_model),
++                            esc(&step_context.settings.model_info.slug),
++                            esc(&sess.thread_id.to_string()),
++                            match response_id_for_assessment.as_deref() {
++                                Some(id) => format!("\"{}\"", esc(id)),
++                                None => "null".to_string(),
++                            },
++                        );
++                        let _ = std::fs::OpenOptions::new()
++                            .create(true)
++                            .append(true)
++                            .open(path)
++                            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
++                    }
++                }
+                 if !turn_context
+                     .server_model_warning_emitted
+                     .load(Ordering::Relaxed)
