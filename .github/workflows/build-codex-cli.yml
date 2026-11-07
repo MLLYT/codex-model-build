@@ -1,0 +1,95 @@
+name: build-codex-cli
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: never
+      UPSTREAM_TAG: rust-v0.167.0-alpha.3.2
+      UPSTREAM_HEAD: c40729e
+    steps:
+      - name: Show runner disk
+        shell: pwsh
+        run: Get-PSDrive C | Select-Object Used,Free | Format-Table | Out-String | Write-Host
+
+      - name: Checkout upstream codex at exact tag
+        uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: rust-v0.167.0-alpha.3.2
+          path: src
+          fetch-depth: 1
+
+      - name: Checkout this build repo (patch lives here)
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Verify upstream commit
+        shell: pwsh
+        run: |
+          $h = git -C src rev-parse --short HEAD
+          Write-Host "upstream_head=$h"
+          "upstream_tag=$env:UPSTREAM_TAG" | Out-File -Encoding utf8 tools/build-info.txt
+          "upstream_head=$h" | Out-File -Append -Encoding utf8 tools/build-info.txt
+          if ($h -ne $env:UPSTREAM_HEAD) { throw "unexpected upstream commit $h (expected $env:UPSTREAM_HEAD)" }
+
+      - name: Verify patch applies
+        shell: pwsh
+        run: |
+          git -C src apply --check ../tools/server_model_bypass.patch
+          if ($LASTEXITCODE -ne 0) { throw "patch does not apply cleanly" }
+          Write-Host "patch check OK"
+
+      - name: Apply patch
+        shell: pwsh
+        run: |
+          git -C src apply ../tools/server_model_bypass.patch
+          if ($LASTEXITCODE -ne 0) { throw "patch apply failed" }
+          git -C src diff --stat | Tee-Object -FilePath tools/patch-diffstat.txt
+
+      - name: Install Rust 1.98.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/codex-rs -> target
+
+      - name: Build codex CLI only
+        shell: pwsh
+        run: |
+          cd src/codex-rs
+          cargo build --release -p codex-cli --bin codex 2>&1 | Tee-Object -FilePath ../../tools/cargo-build.log
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+
+      - name: Version and SHA-256
+        shell: pwsh
+        run: |
+          $exe = "src/codex-rs/target/release/codex.exe"
+          if (-not (Test-Path $exe)) { throw "codex.exe not produced" }
+          $ver = (& $exe --version) -join " "
+          Write-Host "version=$ver"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $exe).Length
+          "version=$ver" | Out-File -Append -Encoding utf8 tools/build-info.txt
+          "sha256=$hash" | Out-File -Append -Encoding utf8 tools/build-info.txt
+          "bytes=$size" | Out-File -Append -Encoding utf8 tools/build-info.txt
+          Get-Content tools/build-info.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-cli-patched
+          if-no-files-found: error
+          path: |
+            src/codex-rs/target/release/codex.exe
+            tools/build-info.txt
+            tools/patch-diffstat.txt
+            tools/cargo-build.log
